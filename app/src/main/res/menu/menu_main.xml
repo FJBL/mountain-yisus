@@ -1,0 +1,18 @@
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_decision_tree"
+        android:orderInCategory="100"
+        android:title="Árbol de decisiones"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_emergency"
+        android:orderInCategory="101"
+        android:title="Emergencias"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_abcde"
+        android:orderInCategory="102"
+        android:title="Evaluación ABCDE"
+        app:showAsAction="never" />
+</menu>
