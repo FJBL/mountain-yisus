@@ -15,4 +15,14 @@
         android:orderInCategory="102"
         android:title="Evaluación ABCDE"
         app:showAsAction="never" />
+    <item
+        android:id="@+id/action_heat"
+        android:orderInCategory="103"
+        android:title="Golpe de calor"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_gpx"
+        android:orderInCategory="104"
+        android:title="Rutas GPX 3D"
+        app:showAsAction="never" />
 </menu>

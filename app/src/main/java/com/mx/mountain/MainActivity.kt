@@ -49,7 +49,6 @@ class MainActivity : AppCompatActivity() {
         val navController = findNavController(R.id.nav_host_fragment_content_main)
         return when (item.itemId) {
             R.id.action_decision_tree -> {
-                navController.popBackStack(R.id.FirstFragment, false)
                 navController.navigate(R.id.FirstFragment)
                 true
             }
@@ -59,6 +58,14 @@ class MainActivity : AppCompatActivity() {
             }
             R.id.action_abcde -> {
                 navController.navigate(R.id.AbcdeFragment)
+                true
+            }
+            R.id.action_heat -> {
+                navController.navigate(R.id.HeatFragment)
+                true
+            }
+            R.id.action_gpx -> {
+                navController.navigate(R.id.GpxFragment)
                 true
             }
             else -> super.onOptionsItemSelected(item)

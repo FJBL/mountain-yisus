@@ -3,7 +3,13 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/nav_graph"
-    app:startDestination="@id/FirstFragment">
+    app:startDestination="@id/HomeFragment">
+
+    <fragment
+        android:id="@+id/HomeFragment"
+        android:name="com.mx.mountain.HomeFragment"
+        android:label="Mountain"
+        tools:layout="@layout/fragment_home" />
 
     <fragment
         android:id="@+id/FirstFragment"
@@ -30,4 +36,14 @@
         android:name="com.mx.mountain.AbcdeFragment"
         android:label="Evaluación ABCDE"
         tools:layout="@layout/fragment_abcde" />
+    <fragment
+        android:id="@+id/HeatFragment"
+        android:name="com.mx.mountain.HeatFragment"
+        android:label="Golpe de calor"
+        tools:layout="@layout/fragment_heat" />
+    <fragment
+        android:id="@+id/GpxFragment"
+        android:name="com.mx.mountain.GpxFragment"
+        android:label="Rutas GPX 3D"
+        tools:layout="@layout/fragment_gpx" />
 </navigation>
