@@ -22,15 +22,154 @@ object RouteVideoEncoder {
     private const val HEIGHT = 960
     private const val FRAME_RATE = 30
 
+    fun encodeWithLiveMap(
+        context: Context,
+        output: File,
+        points: List<RoutePoint>,
+        statisticsText: String,
+        mapMode: RouteMapMode,
+        routeView: SatelliteRouteView,
+        callback: (File?, Exception?) -> Unit
+    ) {
+        if (output.exists()) output.delete()
+
+        Thread {
+            var encoder: MediaCodec? = null
+            var muxer: MediaMuxer? = null
+            try {
+                val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, WIDTH, HEIGHT).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+                    setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                }
+
+                encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                encoder.start()
+
+                muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val info = MediaCodec.BufferInfo()
+                var trackIndex = -1
+                var muxerStarted = false
+                val frameCount = 450
+
+                for (frame in 0 until frameCount) {
+                    val progress = frame / (frameCount - 1f)
+                    val capture = java.util.concurrent.CountDownLatch(1)
+                    var frameBitmap: Bitmap? = null
+                    routeView.post {
+                        routeView.previewProgress(progress)
+                        routeView.postDelayed({
+                            routeView.snapshot { bitmap ->
+                                frameBitmap = bitmap
+                                capture.countDown()
+                            }
+                        }, 90)
+                    }
+                    if (!capture.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw IllegalStateException("Tiempo agotado al capturar el fotograma $frame")
+                    }
+
+                    val captured = frameBitmap
+                    if (captured == null) throw IllegalStateException("No fue posible capturar el mapa en movimiento")
+
+                    val inputIndex = encoder.dequeueInputBuffer(10_000)
+                    if (inputIndex >= 0) {
+                        val scaled = Bitmap.createScaledBitmap(captured, WIDTH, HEIGHT, true)
+                        val outputFrame = if (progress >= 0.67f && statisticsText.isNotBlank()) {
+                            addStatisticsOverlay(scaled, statisticsText)
+                        } else scaled
+                        val yuv = argbToYuv420(outputFrame)
+                        if (outputFrame !== scaled) outputFrame.recycle()
+                        scaled.recycle()
+                        val inputBuffer = encoder.getInputBuffer(inputIndex)
+                        inputBuffer?.clear()
+                        if (inputBuffer != null && yuv.size <= inputBuffer.remaining()) {
+                            inputBuffer.put(yuv)
+                            encoder.queueInputBuffer(inputIndex, 0, yuv.size, frame * 1_000_000L / FRAME_RATE, 0)
+                        } else {
+                            encoder.queueInputBuffer(inputIndex, 0, 0, frame * 1_000_000L / FRAME_RATE, 0)
+                            throw IllegalStateException("Búfer de video insuficiente: ${inputBuffer?.remaining() ?: 0} bytes")
+                        }
+                    }
+                    captured.recycle()
+
+                    var outputIndex = encoder.dequeueOutputBuffer(info, 10_000)
+                    while (outputIndex >= 0) {
+                        if (!muxerStarted) {
+                            if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                outputIndex = encoder.dequeueOutputBuffer(info, 10_000)
+                                continue
+                            }
+                            trackIndex = muxer.addTrack(encoder.outputFormat)
+                            muxer.start()
+                            muxerStarted = true
+                        }
+                        val outputBuffer = encoder.getOutputBuffer(outputIndex)
+                        if (outputBuffer != null && info.size > 0) {
+                            outputBuffer.position(info.offset)
+                            outputBuffer.limit(info.offset + info.size)
+                            muxer.writeSampleData(trackIndex, outputBuffer, info)
+                        }
+                        encoder.releaseOutputBuffer(outputIndex, false)
+                        outputIndex = encoder.dequeueOutputBuffer(info, 10_000)
+                    }
+
+                }
+
+                val endIndex = encoder.dequeueInputBuffer(10_000)
+                if (endIndex >= 0) {
+                    encoder.queueInputBuffer(endIndex, 0, 0, frameCount * 1_000_000L / FRAME_RATE, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                }
+
+                var eos = false
+                while (!eos) {
+                    val outputIndex = encoder.dequeueOutputBuffer(info, 10_000)
+                    if (outputIndex >= 0) {
+                        if (info.size > 0 && muxerStarted) {
+                            val outputBuffer = encoder.getOutputBuffer(outputIndex)
+                            if (outputBuffer != null) {
+                                outputBuffer.position(info.offset)
+                                outputBuffer.limit(info.offset + info.size)
+                                muxer.writeSampleData(trackIndex, outputBuffer, info)
+                            }
+                        }
+                        encoder.releaseOutputBuffer(outputIndex, false)
+                        if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) eos = true
+                    }
+                }
+
+                encoder.stop()
+                encoder.release()
+                encoder = null
+                muxer.stop()
+                muxer.release()
+                muxer = null
+                callback(output, null)
+            } catch (error: Exception) {
+                try { encoder?.stop() } catch (_: Exception) {}
+                try { encoder?.release() } catch (_: Exception) {}
+                try { muxer?.release() } catch (_: Exception) {}
+                callback(null, error)
+            }
+        }.start()
+    }
+
     fun encodeWithMapBackground(
         context: Context,
         output: File,
         mapBitmap: Bitmap,
         points: List<RoutePoint>,
         callback: (File?, Exception?) -> Unit,
-        statisticsText: String = ""
+        statisticsText: String = "",
+        mapMode: RouteMapMode = RouteMapMode.SATELLITE
     ) {
-        encode(context, output, points, emptyList(), RouteMapMode.SATELLITE, callback, mapBitmap, statisticsText)
+        if (mapBitmap.width < 100 || mapBitmap.height < 100) {
+            callback(null, IllegalStateException("Captura satelital inválida"))
+            return
+        }
+        encode(context, output, points, emptyList(), mapMode, callback, mapBitmap, statisticsText)
     }
 
     fun encode(
@@ -64,21 +203,23 @@ object RouteVideoEncoder {
                 var trackIndex = -1
                 var muxerStarted = false
                 val timeoutUs = 10_000L
-                val frameCount = 45
+                val frameCount = 450
 
                 for (frame in 0 until frameCount) {
                     val inputIndex = encoder.dequeueInputBuffer(timeoutUs)
                     if (inputIndex >= 0) {
                         val inputBuffer = encoder.getInputBuffer(inputIndex)
                         inputBuffer?.clear()
-                        val bitmap = if (mapBitmap != null)
-                            renderMapFrame(mapBitmap, points, frame / (frameCount - 1f), statisticsText)
-                        else
-                            renderFrame(points, photos, frame / (frameCount - 1f), mapMode)
+                        if (mapBitmap == null) throw IllegalStateException("La captura satelital no está disponible")
+                        val bitmap = renderMapFrame(mapBitmap, points, frame / (frameCount - 1f), statisticsText)
                         val yuv = argbToYuv420(bitmap)
-                        inputBuffer?.put(yuv)
-                        val presentationTimeUs = frame * 1_000_000L / FRAME_RATE
-                        encoder.queueInputBuffer(inputIndex, 0, yuv.size, presentationTimeUs, 0)
+                        if (inputBuffer != null && yuv.size <= inputBuffer.remaining()) {
+                            inputBuffer.put(yuv)
+                            val presentationTimeUs = frame * 1_000_000L / FRAME_RATE
+                            encoder.queueInputBuffer(inputIndex, 0, yuv.size, presentationTimeUs, 0)
+                        } else {
+                            throw IllegalStateException("Búfer de video insuficiente: ${inputBuffer?.remaining() ?: 0} bytes")
+                        }
                         bitmap.recycle()
                     }
 
@@ -149,9 +290,12 @@ object RouteVideoEncoder {
 
         val dest = android.graphics.RectF(0f, 0f, WIDTH.toFloat(), HEIGHT.toFloat())
         val source = android.graphics.Rect(0, 0, mapBitmap.width, mapBitmap.height)
-        canvas.drawBitmap(mapBitmap, source, dest, Paint(Paint.FILTER_BITMAP_FLAG))
+        canvas.drawColor(if (mapBitmap.isRecycled) Color.rgb(75, 90, 72) else Color.TRANSPARENT)
+        if (!mapBitmap.isRecycled) {
+            canvas.drawBitmap(mapBitmap, source, dest, Paint(Paint.FILTER_BITMAP_FLAG))
+        }
 
-        val overlay = Paint().apply { color = Color.argb(40, 0, 0, 0) }
+        val overlay = Paint().apply { color = Color.argb(18, 0, 0, 0) }
         canvas.drawRect(0f, 0f, WIDTH.toFloat(), HEIGHT.toFloat(), overlay)
 
         val minLat = points.minOf { it.latitude }
@@ -181,8 +325,8 @@ object RouteVideoEncoder {
             if (index == 0) animated.moveTo(x, y) else animated.lineTo(x, y)
         }
 
-        val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 18f; color = Color.argb(180, 0, 35, 20) }
-        val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 10f; color = Color.rgb(255, 193, 7); strokeCap = Paint.Cap.ROUND }
+        val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 20f; color = Color.argb(170, 0, 35, 20) }
+        val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 12f; color = Color.rgb(255, 193, 7); strokeCap = Paint.Cap.ROUND }
         val marker = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = Color.rgb(255, 193, 7) }
         canvas.drawPath(route, shadow)
         canvas.drawPath(animated, line)
@@ -195,7 +339,7 @@ object RouteVideoEncoder {
         val title = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 46f; setShadowLayer(8f, 0f, 2f, Color.BLACK) }
         canvas.drawText("RUTA 3D · SATÉLITE", 48f, 82f, title)
 
-        if (progress >= 0.82f && statisticsText.isNotBlank()) {
+        if (progress >= 0.67f && statisticsText.isNotBlank()) {
             val cardTop = HEIGHT - 310f
             val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(220, 12, 24, 18) }
             canvas.drawRoundRect(42f, cardTop, WIDTH - 42f, HEIGHT - 55f, 24f, 24f, cardPaint)
@@ -281,6 +425,36 @@ object RouteVideoEncoder {
         return bitmap
     }
 
+    private fun addStatisticsOverlay(source: Bitmap, statisticsText: String): Bitmap {
+        val bitmap = source.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(bitmap)
+
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 42f
+            setShadowLayer(8f, 0f, 2f, Color.BLACK)
+        }
+        canvas.drawText("RUTA 3D", 48f, 72f, titlePaint)
+
+        val cardTop = HEIGHT - 300f
+        val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(220, 12, 24, 18)
+        }
+        canvas.drawRoundRect(42f, cardTop, WIDTH - 42f, HEIGHT - 42f, 24f, 24f, cardPaint)
+
+        val statsPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 26f
+            setShadowLayer(5f, 0f, 2f, Color.BLACK)
+        }
+        var lineY = cardTop + 58f
+        statisticsText.split('\n').forEach { line ->
+            canvas.drawText(line, 70f, lineY, statsPaint)
+            lineY += 42f
+        }
+        return bitmap
+    }
+
     private fun argbToYuv420(bitmap: Bitmap): ByteArray {
         val width = bitmap.width
         val height = bitmap.height
@@ -288,7 +462,8 @@ object RouteVideoEncoder {
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
         val yuv = ByteArray(width * height * 3 / 2)
         var yIndex = 0
-        var uvIndex = width * height
+        var uIndex = width * height
+        var vIndex = uIndex + width * height / 4
 
         for (j in 0 until height) {
             for (i in 0 until width) {
@@ -297,12 +472,13 @@ object RouteVideoEncoder {
                 val g = (pixel shr 8) and 0xff
                 val b = pixel and 0xff
                 val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
-                val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
-                val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
-                yuv[yIndex++] = y.coerceIn(0, 255).toByte()
+                yuv[yIndex++] = y.coerceIn(16, 235).toByte()
+
                 if (j % 2 == 0 && i % 2 == 0) {
-                    yuv[uvIndex++] = u.coerceIn(0, 255).toByte()
-                    yuv[uvIndex++] = v.coerceIn(0, 255).toByte()
+                    val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
+                    val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
+                    yuv[uIndex++] = u.coerceIn(16, 240).toByte()
+                    yuv[vIndex++] = v.coerceIn(16, 240).toByte()
                 }
             }
         }

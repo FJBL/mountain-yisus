@@ -31,6 +31,7 @@ class SatelliteRouteView @JvmOverloads constructor(
     private var visiblePolyline: Any? = null
     private var progressMarker: Any? = null
     var onMapReady: (() -> Unit)? = null
+    private var selectedMode = RouteMapMode.SATELLITE
 
     init {
         MapLibre.getInstance(context)
@@ -113,13 +114,19 @@ class SatelliteRouteView @JvmOverloads constructor(
                     .title("● Recorriendo")
                     .snippet("Punto ${count} de ${points.size}" + (points[count - 1].elevation?.let { " · %.0f m".format(it) } ?: ""))
             )
-            map.animateCamera(CameraUpdateFactory.newLatLngZoom(current, 15.0))
+            val zoom = if (progress < 0.20f) {
+                10.5
+            } else {
+                12.0 + ((progress - 0.20f) / 0.80f).toDouble() * 4.5
+            }
+            map.animateCamera(CameraUpdateFactory.newLatLngZoom(current, zoom), 700)
         }
     }
 
     fun hasRoute(): Boolean = points.size >= 2
 
     fun setSatellite() {
+        selectedMode = RouteMapMode.SATELLITE
         setRoute(points)
     }
 
@@ -128,42 +135,95 @@ class SatelliteRouteView @JvmOverloads constructor(
     }
 
     fun setTerrain() {
+        selectedMode = RouteMapMode.TERRAIN
         mapView.getMapAsync { map ->
-            map.setStyle("https://tiles.stadiamaps.com/styles/outdoors.json")
+            map.setStyle("https://tiles.stadiamaps.com/styles/outdoors.json") { style ->
+                val latLngs = points.map { LatLng(it.latitude, it.longitude) }
+                if (latLngs.size >= 2) {
+                    map.addPolyline(PolylineOptions().addAll(latLngs).color(0xFF4BD27D.toInt()).width(10f))
+                    map.addMarker(MarkerOptions().position(latLngs.first()).title("Inicio"))
+                    map.addMarker(MarkerOptions().position(latLngs.last()).title("Fin"))
+                    val bounds = LatLngBounds.Builder().includes(latLngs).build()
+                    map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 120))
+                    map.uiSettings.isTiltGesturesEnabled = true
+                    map.uiSettings.isRotateGesturesEnabled = true
+                }
+                onMapReady?.invoke()
+            }
         }
     }
 
     fun exportVerticalVideo(context: Context, callback: (java.io.File?, Exception?) -> Unit, statisticsText: String = "") {
+        if (points.size < 2) {
+            callback(null, IllegalStateException("No hay una ruta cargada"))
+            return
+        }
+
         mapView.getMapAsync { map ->
             mapView.postDelayed({
-                val preview = snapshot()
-                RouteVideoEncoder.encodeWithMapBackground(
-                    context,
-                    java.io.File(context.cacheDir, "ruta_3d.mp4"),
-                    preview,
-                    points,
-                    callback,
-                    statisticsText
-                )
-            }, 1500)
+                snapshot { mapCapture ->
+                    if (mapCapture == null) {
+                        callback(null, IllegalStateException("No fue posible capturar el mapa de relieve"))
+                        return@snapshot
+                    }
+                    RouteVideoEncoder.encodeWithMapBackground(
+                        context,
+                        java.io.File(context.cacheDir, "ruta_3d.mp4"),
+                        mapCapture,
+                        points,
+                        callback,
+                        statisticsText,
+                        selectedMode
+                    )
+                }
+            }, 3000)
         }
+    }
+
+    fun snapshot(callback: (Bitmap?) -> Unit) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) {
+            callback(null)
+            return
+        }
+
+        val width = mapView.width.coerceAtLeast(540)
+        val height = mapView.height.coerceAtLeast(960)
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val location = IntArray(2)
+        mapView.getLocationOnScreen(location)
+        val left = location[0].coerceAtLeast(0)
+        val top = location[1].coerceAtLeast(0)
+        val rect = android.graphics.Rect(left, top, left + mapView.width, top + mapView.height)
+        val window = (context as? android.app.Activity)?.window
+        if (window == null) {
+            bitmap.recycle()
+            callback(null)
+            return
+        }
+
+        mapView.postInvalidate()
+        android.view.PixelCopy.request(window, rect, bitmap, { result ->
+            if (result == android.view.PixelCopy.SUCCESS) {
+                callback(bitmap)
+            } else {
+                bitmap.recycle()
+                callback(null)
+            }
+        }, Handler(Looper.getMainLooper()))
     }
 
     fun snapshot(): Bitmap {
         val bitmap = Bitmap.createBitmap(
-            width.coerceAtLeast(540),
-            height.coerceAtLeast(960),
+            mapView.width.coerceAtLeast(540),
+            mapView.height.coerceAtLeast(960),
             Bitmap.Config.ARGB_8888
         )
         val location = IntArray(2)
         mapView.getLocationOnScreen(location)
         val rect = android.graphics.Rect(location[0], location[1], location[0] + mapView.width, location[1] + mapView.height)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            val window = (context as? android.app.Activity)?.window
-            if (window != null) {
-                val listener = android.view.PixelCopy.OnPixelCopyFinishedListener { }
-                android.view.PixelCopy.request(window, rect, bitmap, listener, Handler(Looper.getMainLooper()))
-            }
+        val window = (context as? android.app.Activity)?.window
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && window != null) {
+            android.view.PixelCopy.request(window, rect, bitmap, { }, Handler(Looper.getMainLooper()))
         }
         return bitmap
     }

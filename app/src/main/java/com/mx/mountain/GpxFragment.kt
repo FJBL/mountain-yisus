@@ -65,9 +65,9 @@ class GpxFragment : Fragment() {
         previewAnimator?.cancel()
         binding.previewProgress.progress = 0
         binding.previewStatsOverlay.text = previewStatsText
-        binding.previewStatsOverlay.visibility = View.GONE
+        binding.previewStatsOverlay.visibility = View.VISIBLE
         previewAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 6000
+            duration = 15000
             interpolator = LinearInterpolator()
             repeatCount = 0
             addListener(object : android.animation.Animator.AnimatorListener {
@@ -77,11 +77,16 @@ class GpxFragment : Fragment() {
                 override fun onAnimationEnd(animation: android.animation.Animator) {
                     binding.previewStatsOverlay.text = previewStatsText
                     binding.previewStatsOverlay.visibility = View.VISIBLE
+                    binding.previewProgress.postDelayed({
+                        binding.previewStatsOverlay.visibility = View.GONE
+                    }, 5000)
                 }
             })
             addUpdateListener { animation ->
                 val progress = animation.animatedValue as Float
                 binding.previewProgress.progress = (progress * 100).toInt()
+                binding.previewStatsOverlay.visibility =
+                    if (progress >= 0.67f) View.VISIBLE else View.GONE
                 binding.routeView.previewProgress(progress)
             }
             start()
@@ -203,12 +208,20 @@ class GpxFragment : Fragment() {
         binding.routeView.exportVerticalVideo(requireContext(), { file, error ->
             requireActivity().runOnUiThread {
             binding.buttonExportVideo.isEnabled = true
-            if (error != null || file == null) {
-                binding.gpxStats.text = "No fue posible generar el video: ${error?.message ?: "error desconocido"}"
+            if (error != null) {
+                binding.gpxStats.text = "No fue posible generar el video: ${error.message ?: error.javaClass.simpleName}"
+                return@runOnUiThread
+            }
+            if (file == null) {
+                binding.gpxStats.text = "No fue posible generar el video: el codificador no devolvió el archivo"
                 return@runOnUiThread
             }
 
-            binding.gpxStats.text = "Video generado correctamente: ruta_3d.mp4"
+            if (!file.exists() || file.length() == 0L) {
+                binding.gpxStats.text = "No fue posible generar el video: archivo MP4 vacío o inexistente"
+                return@runOnUiThread
+            }
+            binding.gpxStats.text = "Video generado correctamente: ruta_3d.mp4 (${file.length() / 1024} KB)"
             val uri = FileProvider.getUriForFile(requireContext(), "${requireContext().packageName}.fileprovider", file)
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "video/mp4"
